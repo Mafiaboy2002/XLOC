@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Location & Camera Permission Demo</title>
+  <style>
+    /* Simple styles */
+    :root{--bg:#fafafa;--card:#fff;--accent:#2563eb;--danger:#dc2626}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:0;background:var(--bg);color:#111}
+    .center {display:flex;align-items:center;justify-content:center;height:100vh;padding:1rem;box-sizing:border-box}
+    .card{background:var(--card);padding:1.25rem;border-radius:12px;box-shadow:0 6px 18px rgba(0,0,0,.06);max-width:900px;width:100%}
+    h1{margin:0 0 .5rem;font-size:1.25rem}
+    p{margin:.25rem 0 1rem;color:#444}
+    .controls{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem}
+    button{background:var(--accent);color:#fff;border:0;padding:.5rem .9rem;border-radius:8px;cursor:pointer;font-weight:600}
+    button.ghost{background:transparent;color:var(--accent);border:1px solid rgba(37,99,235,.15)}
+    button.danger{background:var(--danger)}
+    .status{margin:0.5rem 0;padding:.5rem;border-radius:8px;background:#f3f4f6;color:#111}
+    .flex{display:flex;gap:1rem;align-items:flex-start}
+    video{border-radius:8px;width:320px;height:240px;background:#000;object-fit:cover}
+    canvas{display:none}
+    .info{flex:1}
+    .small{font-size:.9rem;color:#333}
+    .muted{color:#666;font-size:.85rem}
+    .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:1000}
+    .modal{background:#fff;padding:1.25rem;border-radius:10px;max-width:520px;width:94%}
+    .modal h2{margin:0 0 .5rem}
+    .form-row{margin-top:.5rem;display:flex;gap:.5rem}
+    .link{color:var(--accent);text-decoration:underline;cursor:pointer;background:none;border:0;padding:0}
+  </style>
+</head>
+<body>
+  <div class="center">
+    <div class="card" role="main">
+      <h1>Location & Camera demo</h1>
+      <p class="muted">This demo will request access to your device's location and camera. When allowed, it shows the camera preview and sends a snapshot + location to the backend endpoint <code>/upload</code>.</p>
+
+      <div class="controls">
+        <button id="openModal">Request permissions</button>
+        <button id="stopBtn" class="ghost" disabled>Stop camera</button>
+        <button id="snapBtn" class="ghost" disabled>Take Snapshot & Upload</button>
+        <button id="clearBtn" class="ghost" disabled>Clear</button>
+      </div>
+
+      <div class="status" id="status">Status: idle</div>
+
+      <div class="flex">
+        <video id="video" autoplay playsinline></video>
+        <div class="info">
+          <div><strong>Location:</strong></div>
+          <div id="locText" class="small muted">Not obtained yet</div>
+          <div style="height:8px"></div>
+          <div><strong>Backend upload:</strong></div>
+          <div id="uploadText" class="small muted">Not uploaded yet</div>
+          <div style="height:8px"></div>
+          <div class="muted">Backend endpoint (change in JS): <code id="endpointText">/upload</code></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- hidden canvas used to capture frames -->
+  <canvas id="snapCanvas" width="320" height="240"></canvas>
+
+  <!-- modal -->
+  <div id="modal" class="modal-overlay" style="display:none">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <h2 id="modalTitle">Allow Access</h2>
+      <p>To continue, this website needs permission to access your <strong>location</strong> and <strong>camera</strong>. The browser will show a permission popup — please allow both if you want the demo to work fully.</p>
+      <div class="form-row">
+        <button id="allowBtn">Allow Location & Camera</button>
+        <button id="cancelBtn" class="ghost">Cancel</button>
+      </div>
+      <p class="muted" style="margin-top:.75rem">You can stop sharing at any time by clicking "Stop camera" or changing site permissions in the browser.</p>
+    </div>
+  </div>
+
+  <script>
+    // ========== CONFIG ==========
+    // Change this to your backend URL if necessary (must be same-origin or CORS-enabled)
+    const BACKEND_UPLOAD_URL = '/upload';
+
+    // ========== UI refs ==========
+    const openModalBtn = document.getElementById('openModal');
+    const stopBtn = document.getElementById('stopBtn');
+    const snapBtn = document.getElementById('snapBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const statusEl = document.getElementById('status');
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('snapCanvas');
+    const locText = document.getElementById('locText');
+    const uploadText = document.getElementById('uploadText');
+    const modal = document.getElementById('modal');
+    const allowBtn = document.getElementById('allowBtn');
+    const cancelBtn = document.getElementById('cancelBtn');
+    const endpointText = document.getElementById('endpointText');
+    endpointText.textContent = BACKEND_UPLOAD_URL;
+
+    let mediaStream = null;
+    let lastLocation = null;
+
+    function setStatus(msg, isError=false) {
+      statusEl.textContent = 'Status: ' + msg;
+      statusEl.style.background = isError ? '#ffefef' : '#f3f4f6';
+      statusEl.style.color = isError ? '#7a0707' : '';
+    }
+
+    // show modal
+    openModalBtn.addEventListener('click', () => {
+      modal.style.display = 'flex';
+    });
+    cancelBtn.addEventListener('click', () => {
+      modal.style.display = 'none';
+      setStatus('permission request cancelled by user');
+    });
+
+    // Main permission flow when user clicks Allow
+    allowBtn.addEventListener('click', async () => {
+      modal.style.display = 'none';
+      setStatus('requesting permissions...');
+      try {
+        // Request camera and start preview
+        await startCamera();
+
+        // Request location
+        await requestLocation();
+
+        setStatus('Permissions granted and data obtained');
+        snapBtn.disabled = false;
+        stopBtn.disabled = false;
+        clearBtn.disabled = false;
+      } catch (err) {
+        console.error(err);
+        setStatus('Error: ' + (err && err.message ? err.message : String(err)), true);
+      }
+    });
+
+    // Start camera, ask permission
+    async function startCamera() {
+      // Prefer environment-facing camera when available
+      const constraints = { video: { width: 640, height: 480, facingMode: 'environment' }, audio: false };
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = mediaStream;
+        await video.play();
+        setStatus('Camera started');
+      } catch (e) {
+        throw new Error('Camera access denied or not available: ' + e.message);
+      }
+    }
+
+    // Stop camera
+    stopBtn.addEventListener('click', () => {
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(t => t.stop());
+        mediaStream = null;
+        video.srcObject = null;
+        setStatus('Camera stopped');
+        stopBtn.disabled = true;
+        snapBtn.disabled = true;
+      }
+    });
+
+    // Request geolocation (single shot)
+    function requestLocation() {
+      return new Promise((resolve, reject) => {
+        if (!('geolocation' in navigator)) {
+          return reject(new Error('Geolocation is not supported in this browser.'));
+        }
+        // timeout & highAccuracy options
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            lastLocation = {
+              latitude: pos.coords.latitude,
+              longitude: pos.coords.longitude,
+              accuracy: pos.coords.accuracy,
+              timestamp: new Date(pos.timestamp).toISOString()
+            };
+            locText.textContent = `Lat: ${lastLocation.latitude.toFixed(6)}, Lon: ${lastLocation.longitude.toFixed(6)} (±${lastLocation.accuracy} m)`;
+            resolve(lastLocation);
+          },
+          (err) => {
+            reject(new Error('Location access denied or unavailable: ' + err.message));
+          },
+          { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+        );
+      });
+    }
+
+    // Capture snapshot and upload
+    snapBtn.addEventListener('click', async () => {
+      setStatus('capturing snapshot...');
+      try {
+        if (!mediaStream) throw new Error('Camera not started');
+        // draw video frame to canvas
+        const w = 640, h = 480;
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, w, h);
+
+        // convert to blob
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.85));
+        if (!blob) throw new Error('Failed to create image blob');
+
+        // prepare form data
+        const fd = new FormData();
+        fd.append('photo', blob, 'snapshot.jpg');
+        fd.append('meta', JSON.stringify({
+          timestamp: new Date().toISOString(),
+          location: lastLocation || null,
+          userAgent: navigator.userAgent
+        }));
+
+        setStatus('uploading snapshot + location to server...');
+        uploadText.textContent = 'Uploading...';
+
+        // send to backend
+        const res = await fetch(BACKEND_UPLOAD_URL, {
+          method: 'POST',
+          body: fd,
+        });
+
+        if (!res.ok) {
+          const text = await res.text().catch(()=>res.statusText);
+          throw new Error('Upload failed: ' + res.status + ' ' + text);
+        }
+
+        const result = await res.json().catch(()=>({status:'ok'}));
+        uploadText.textContent = 'Upload successful: ' + (result.message || JSON.stringify(result));
+        setStatus('Snapshot uploaded successfully');
+      } catch (err) {
+        console.error(err);
+        setStatus('Error: ' + (err.message || String(err)), true);
+        uploadText.textContent = 'Upload failed: ' + (err.message || String(err));
+      }
+    });
+
+    clearBtn.addEventListener('click', () => {
+      locText.textContent = 'Not obtained yet';
+      uploadText.textContent = 'Not uploaded yet';
+      lastLocation = null;
+      setStatus('cleared displayed data');
+    });
+
+    // Optional: handle page unload to stop camera
+    window.addEventListener('beforeunload', () => {
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(t => t.stop());
+      }
+    });
+
+    // Quick auto-open for testing: open modal if running on localhost
+    if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+      // don't auto open if scripts run as part of a test — but helpful for developer flow
+      // modal.style.display = 'flex';
+    }
+  </script>
+</body>
+</html>
